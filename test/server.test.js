@@ -30,12 +30,29 @@ test("advertises the database discovery and read-only query tools", async () => 
       [
         "database_health",
         "describe_table",
+        "execute_write_sql",
         "list_schemas",
         "list_tables",
         "query_table",
         "run_readonly_sql",
       ],
     );
+  });
+});
+
+test("rejects writes while write operations are disabled", async () => {
+  await withClient(async (client) => {
+    const response = await client.callTool({
+      name: "execute_write_sql",
+      arguments: {
+        sql: "DELETE FROM public.employees WHERE id = $1 RETURNING id",
+        params: [-1],
+        confirmation: "CONFIRM_WRITE",
+      },
+    });
+
+    assert.equal(response.isError, true);
+    assert.match(response.content[0].text, /Write operations are disabled/i);
   });
 });
 

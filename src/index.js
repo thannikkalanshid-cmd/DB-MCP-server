@@ -17,7 +17,6 @@ const SERVER_NAME = "postgres-data";
 const DEFAULT_ALLOWED_SCHEMAS = ["public"];
 const MAX_SERVER_ROW_LIMIT = 1_000;
 const MAX_TIMEOUT_MS = 60_000;
-655555
 function csv(value, fallback = []) {
   if (!value || !value.trim()) return fallback;
   return value
@@ -38,6 +37,7 @@ const config = {
   defaultRowLimit: positiveInteger(process.env.DEFAULT_ROW_LIMIT, 100, MAX_SERVER_ROW_LIMIT),
   maxRowLimit: positiveInteger(process.env.MAX_ROW_LIMIT, 500, MAX_SERVER_ROW_LIMIT),
   statementTimeoutMs: positiveInteger(process.env.STATEMENT_TIMEOUT_MS, 10_000, MAX_TIMEOUT_MS),
+  writeOperationsEnabled: process.env.ENABLE_WRITE_OPERATIONS === "true",
 };
 
 config.maxRowLimit = Math.max(config.defaultRowLimit, config.maxRowLimit);
@@ -116,6 +116,28 @@ async function inReadOnlyTransaction(work) {
     } catch {
       // The connection may not have reached BEGIN; releasing it is still safe.
     }
+    client.release();
+  }
+}
+
+async function inWriteTransaction(work) {
+  const client = await getPool().connect();
+
+  try {
+    await client.query("BEGIN");
+    await client.query("SELECT set_config('statement_timeout', $1, true)", [String(config.statementTimeoutMs)]);
+    await client.query("SELECT set_config('lock_timeout', '3000', true)");
+    const result = await work(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // Preserve the original failure if the transaction could not start.
+    }
+    throw error;
+  } finally {
     client.release();
   }
 }
@@ -206,6 +228,44 @@ server.tool(
       allowed_schemas: [...config.allowedSchemas],
       table_allow_list_enabled: config.allowedTables.size > 0,
       max_row_limit: config.maxRowLimit,
+    });
+  }),
+);
+
+server.tool(
+  "execute_write_sql",
+  "Perform exactly one parameterized INSERT, UPDATE, or DELETE statement. This is disabled unless ENABLE_WRITE_OPERATIONS=true in .env. It requires confirmation, a RETURNING clause, and a WHERE clause for UPDATE and DELETE.",
+  {
+    sql: z.string().min(1).max(50_000),
+    params: z.array(z.unknown()).default([]),
+    confirmation: z.literal("CONFIRM_WRITE"),
+  },
+  { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  requestHandler(async ({ sql, params }) => {
+    if (!config.writeOperationsEnabled) {
+      throw new Error("Write operations are disabled. Set ENABLE_WRITE_OPERATIONS=true in .env, then restart Codex.");
+    }
+
+    const trimmedSql = sql.trim();
+    const statementType = /^(insert|update|delete)\b/i.exec(trimmedSql)?.[1]?.toUpperCase();
+    if (!statementType) {
+      throw new Error("Only one INSERT, UPDATE, or DELETE statement is allowed.");
+    }
+    if (trimmedSql.includes(";")) {
+      throw new Error("Only one statement is allowed; remove semicolons from the SQL.");
+    }
+    if (!/\breturning\b/i.test(trimmedSql)) {
+      throw new Error("Add a RETURNING clause so the changed rows can be reviewed.");
+    }
+    if ((statementType === "UPDATE" || statementType === "DELETE") && !/\bwhere\b/i.test(trimmedSql)) {
+      throw new Error(`${statementType} must include a WHERE clause.`);
+    }
+
+    const result = await inWriteTransaction((client) => client.query(trimmedSql, params));
+    return jsonResult({
+      operation: statementType,
+      rows_affected: result.rowCount,
+      rows: result.rows,
     });
   }),
 );

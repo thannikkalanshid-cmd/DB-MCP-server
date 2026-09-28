@@ -18,6 +18,16 @@ The server first exposes table discovery tools, then uses:
 
 Every database tool runs in a PostgreSQL `READ ONLY` transaction, has a timeout, limits returned rows, and only allows schemas listed in `ALLOWED_SCHEMAS`.
 
+## Optional write operations
+
+Writes are disabled by default. To enable carefully controlled `INSERT`, `UPDATE`, and `DELETE` operations, set this in your private `.env` file and restart Codex:
+
+```env
+ENABLE_WRITE_OPERATIONS=true
+```
+
+The `execute_write_sql` MCP tool is labelled destructive so Codex requests approval. It also requires the literal confirmation `CONFIRM_WRITE`, exactly one parameterized statement, a `RETURNING` clause, and a `WHERE` clause for `UPDATE` and `DELETE`. Always ask Codex to show the matching rows before approving a change.
+
 ## 1. Make a least-privilege database user
 
 Run the following in `psql` as a database administrator. Replace the database name, password, schema, and table names to match your system. Grant access only to tables Codex actually needs.
